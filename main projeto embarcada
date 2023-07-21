@@ -1,0 +1,257 @@
+/*************************************************************************
+**************************************************************************
+**************************************************************************
+****                 Universidade de Brasília FGA                     ****
+**************************************************************************
+************************************************************************** 
+****                 Eletrônica Embarcada - FGA0096                   ****
+**************************************************************************     
+**************************************************************************
+**** PROF.: GUILLERMO ALVAREZ BESTARD                                 ****
+**** Alunos: JOÃO PAULO DIAS DE OLIVEIRA      Matrícula: 170146324    ****
+****         VICTOR HUGO MENDES FREIRE        Matrícula: 200049836    ****
+****         YURI CESAR CARVALHO AMORIM       Matrícula: 150152671    ****
+****         							      **** 
+**************************************************************************
+************************************************************************** 
+*************************************************************************/
+
+#include "mcc_generated_files/mcc.h"
+#include "ledMatrix.h"
+#include "main.h"
+
+/*
+                         Main application
+ */
+
+#define pwm_dc     409
+
+uint8_t floor_elevator, dir, floor_user, next_floor, motor_state, enconder_pulses = 0, byte_send[4], ascii_rxByte;
+uint16_t pos_elevator, LEDs[8];
+uint8_t count_tmr4 = 0;
+float speed;
+int temp;
+
+
+// Função para mover o elevador para a posição de repouso
+void init_elevator(){
+        __delay_ms(500);
+        floor_elevator = 1;
+        enconder_pulses = 0;
+    
+        while(IO_RB0_GetValue() == 1){// Caso o elevador não esteja no primeiro andar, move ele até lá
+            IO_RA7_SetLow();    // Indica a direção de descida
+            PWM3_LoadDutyValue(pwm_dc);
+        }
+        PWM3_LoadDutyValue(0);
+        motor_state = 0;
+}
+
+
+
+// Move o elevador, já com o usuário, para o andar solicitado
+void move_elevator(){
+    if(floor_user < next_floor){    // Condição para saber se o elevador deve subir ou descer
+        __delay_ms(500);    // Pausa para desaceleração, caso necessário
+        while(floor_elevator != next_floor){
+            IO_RA7_SetHigh();
+            PWM3_LoadDutyValue(pwm_dc);
+            //init_elevator(); 
+            motor_state = 1;
+        }
+    }else if(floor_user > next_floor){
+        __delay_ms(500);
+        while(floor_elevator != next_floor){
+            IO_RA7_SetLow();
+            PWM3_LoadDutyValue(pwm_dc);
+            //init_elevator(); 
+            motor_state = 2;
+        }
+    }
+    PWM3_LoadDutyValue(0);
+    motor_state = 0;    // Muda o estado do motor para "parado"
+    __delay_ms(2000);   // Tempo de espera para entrada/saída de usuários
+}
+
+// Função que é ativada caso o elevador esteja em um andar diferente do andar do usuário
+void move_elevator_to_user(){
+    if(floor_elevator < floor_user){
+        __delay_ms(500);
+        while(floor_elevator != floor_user){
+            IO_RA7_SetHigh();
+            PWM3_LoadDutyValue(pwm_dc);
+            //init_elevator();
+            motor_state = 1;
+        }
+    }else if(floor_elevator > floor_user){
+        __delay_ms(500);
+        while(floor_elevator != floor_user){
+            IO_RA7_SetLow();
+            PWM3_LoadDutyValue(pwm_dc);
+            //init_elevator(); 
+            motor_state = 2;
+        }
+    }
+    
+    PWM3_LoadDutyValue(0);
+    motor_state = 0;
+    __delay_ms(2000);
+    move_elevator();    // Com o elevador no andar do usuário, chama a função que move o elevador para o andar solicitado
+}
+
+/*void upMatrix(){
+    updateMatrix(0, floor_elevator); // Andar atual é igual aos numeros da matriz // começa a escrever a partir da quarta coluna da matrix
+
+    uint8_t direction = 0;   // Direction é igual: 12 = parado; 11= descendo;10=subindo
+    if(floor_elevator < next_floor){ // motor subindo
+        direction = 11;
+    } else if(floor_elevator > next_floor){ // motor descendo
+        direction = 10;
+    } else{
+        direction = 13; 
+    }
+
+    updateMatrix(4, direction); // começa a escrever a partir da primeira coluna da matrix
+    sendMatrix();
+}
+*/
+
+// Função do primeiro andar
+void floor_s1(){
+    floor_elevator = 1; // Indica o último andar que o elevador passou, nesse caso, o primeiro
+    enconder_pulses = 0;    // Reseta o contador do encoder
+}
+
+// Função do segundo andar
+void floor_s2(){
+    floor_elevator = 2;
+}
+
+// Função do terceiro andar
+void floor_s3(){
+    floor_elevator = 3;
+}
+
+// Função do quarto andar
+void floor_s4(){
+    floor_elevator = 4;
+}
+
+// Função que realiza a leitura do sensor óptico, associado ao encoder
+void count_encoder(){
+    if(motor_state == 1){
+        enconder_pulses++;
+    }else if(motor_state == 2){
+        enconder_pulses--;
+    }
+    
+    
+}
+
+uint8_t bin2ascii(uint8_t vBin){
+    vBin = vBin & 0x0F;                             // Apaga nible alto
+    if(vBin<10){                                    // Se valor < 0xA
+        vBin = vBin + 0x30; // 0..9                 // Acresecenta 0x30 (ascii '0')
+    }
+    else{                                           // se não
+        vBin = vBin + 0x37; // A..F                 // accrescenta 0x37 (ascii '0'+7)
+    }
+    return vBin;
+}
+
+uint8_t ascii2bin(uint8_t vAscii){
+    if(vAscii<0x3A){                                // Se valor <= 0x39 ('9') 
+        vAscii = vAscii - 0x30; // '0'..'9'         // subtrai 0x30 (ascii '0')
+    }
+    else{                                           // se não
+        vAscii = vAscii - 0x37; // 'A'..'F'         // subtrai 0x37 (ascii '0'+7)
+    }
+    return vAscii;
+}
+
+// Função para enviar os dados via comunicação serial
+void tx_send(){ 
+    temp = ADC_GetConversion(RA2);      // Obtem a temperatura do sensor LM35
+    temp = (int)((float)temp*0.2);      // Converte a temperatura para unidades de engenharia
+        
+    speed = 180 / (float)time_encoder;  // Calcula a velocidade do motor
+        
+    if(count_tmr4 == 300){  // O timer4 está configurado para gerar uma interrupção a cada 1 ms, portanto é necessário uma contagem de 300 interrupções             
+        pos_elevator = enconder_pulses * 0.8;
+        
+        byte_send[0] = (0x80 | ((motor_state<<4) | (floor_elevator))) & 0xB3; // Envia o estado do motor e o andar atual
+        byte_send[1] = pos_elevator & 0x7F; //  Envia a posição do elevador
+        byte_send[2] = (uint8_t)(speed*4) & 0x7F; // Envia a velocidade
+        byte_send[3] = (uint8_t)(temp*2 ) & 0x7F; // Envia a temperatura
+        
+        if(EUSART_is_tx_ready()){
+            for(uint8_t i = 0; i<4; i++){   // Envia os 4 bytes via comunicação serial
+                EUSART_Write(bin2ascii(byte_send[i]));
+            }
+        }
+        count_tmr4 = 0; // Reseta o contador para o próximo envio
+    }else{
+        count_tmr4++;   // Incrementa o contador
+    }
+}
+
+void main(void)
+{
+    // initialize the device
+    SYSTEM_Initialize();
+    // When using interrupts, you need to set the Global and Peripheral Interrupt Enable bits
+    // Use the following macros to:
+
+    // Enable the Global Interrupts
+    INTERRUPT_GlobalInterruptEnable();
+
+    // Enable the Peripheral Interrupts
+    INTERRUPT_PeripheralInterruptEnable();
+
+    // Disable the Global Interrupts
+    //INTERRUPT_GlobalInterruptDisable();
+
+    // Disable the Peripheral Interrupts
+    //INTERRUPT_PeripheralInterruptDisable();
+    
+    init_elevator();    // Chama a função que leva o elevador para a posição de repouso
+    TMR4_SetInterruptHandler(tx_send);  // Associa a interrupção do timer4 a função de envio dos dados
+    IOCBF0_SetInterruptHandler(floor_s1);   // Associa a interrupção do RB0 a função do primeiro andar
+    IOCBF3_SetInterruptHandler(floor_s2);   // Associa a interrupção do RB3 a função do segundo andar
+    CMP1_SetInterruptHandler(floor_s3);     // Associa a interrupção do comparador1 a função do terceiro andar
+    CMP2_SetInterruptHandler(floor_s4);     // Associa a interrupção do comparador2 a função do quarto andar
+    CCP4_SetCallBack(count_encoder);
+    
+    /**LATBbits.LATB1 = 1; 
+    TRISBbits.TRISB1 = 0;
+    SSP1CON1bits.SSPEN = 1;	//Configura o Periférico SPI
+    
+    
+    initMAX7219();//Inicializa matriz de LED
+    **/
+    
+    while (1)
+    {
+        if(EUSART_is_rx_ready()){   // Verifica se foi recebido algum dado
+            /*while(EUSART_is_rx_ready()){
+                rxByte = ascii2bin(EUSART_Read()); // Armazena o dado recebido
+            }*/
+
+            next_floor = rxByte & 0xF;  // Separa e armazena o andar que o usuario quer ir
+            floor_user = floor_user & 0xF0; // // Separa e armazena o andar que o usuario está
+            floor_user = rxByte >> 4;
+            
+            if(floor_elevator != floor_user){ // Checa se o elevador está no mesmo andar do usuário
+                move_elevator_to_user();    // Se não está, se move até ele
+            }else{
+                move_elevator(); // Casp contrário, vai até o andar solicitado
+            }
+            
+            init_elevator(); // Vai para a posição de repouso
+        }
+        
+    }
+}
+/**
+ End of File
+*/
